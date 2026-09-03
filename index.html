@@ -363,7 +363,11 @@
 
     <div class="card p-5">
       <h2 class="font-display text-lg font-semibold mb-1">Cloud sync</h2>
-      <p class="ink-soft text-xs">Supabase sync arrives in Phase 4, so this device and your partner's device can share one live budget. Right now everything is stored only in this browser's local storage.</p>
+      <p class="ink-soft text-xs mb-3" id="sync-status-text">Not synced yet on this device.</p>
+      <button id="btn-sync-now" class="text-xs accent-bg px-3 py-2 rounded-full font-medium flex items-center gap-1.5">
+        <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Sync now
+      </button>
+      <p class="ink-soft text-xs mt-3">Manual sync — tap this on either phone to push your changes or pull the other person's, whichever is newer. Categories, income, transactions, and savings sync; appearance and PIN stay per-device.</p>
     </div>
 
     <div class="card p-5">
@@ -459,6 +463,87 @@
    ========================================================================= */
 
 const STORAGE_KEY = 'frugalish_data_v2';
+
+// ---------- Supabase (manual two-device sync) ----------
+// The anon key below is meant to be public (same as it would be in any
+// client-side app), but the household_key acts as a private row identifier
+// so having the anon key alone isn't enough to find this household's data —
+// treat your GitHub Pages URL as private too, since that's the real boundary.
+const SUPABASE_URL = 'https://widbnirbrvdvxfywcyfu.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndpZGJuaXJicnZkdnhmeXdjeWZ1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgzNzg0ODAsImV4cCI6MjEwMzk1NDQ4MH0.NIie4VcogiMW7rp__jvoEBfy0uv5iEPiq_5S4br2wbo';
+const HOUSEHOLD_KEY = '21c3f70cbcc34cb58a571e51';
+// Fields that sync between devices. Everything else (theme, palette, PIN,
+// which device this is, which month/filter is being viewed) stays local.
+const SYNCED_KEYS = ['people','income','categories','transactions','savingsGoal','savingsHistory','accountBalances'];
+
+function extractSyncPayload(){
+  const obj = {};
+  SYNCED_KEYS.forEach(k => obj[k] = state[k]);
+  obj.updatedAt = state.updatedAt;
+  return obj;
+}
+function applySyncPayload(payload){
+  SYNCED_KEYS.forEach(k => { if(payload[k] !== undefined) state[k] = payload[k]; });
+  state.updatedAt = payload.updatedAt;
+}
+async function pushToSupabase(){
+  save(); // bumps state.updatedAt
+  const payload = extractSyncPayload();
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/household_state`, {
+    method: 'POST',
+    headers: {
+      apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + SUPABASE_ANON_KEY,
+      'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates'
+    },
+    body: JSON.stringify([{ household_key: HOUSEHOLD_KEY, data: payload, updated_at: state.updatedAt }])
+  });
+  if(!res.ok) throw new Error('Push failed (' + res.status + ')');
+}
+async function syncNow(){
+  const btn = document.getElementById('btn-sync-now');
+  btn.disabled = true;
+  showToast('Syncing…', 2500);
+  try{
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/household_state?household_key=eq.${HOUSEHOLD_KEY}&select=data,updated_at`,
+      { headers: { apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + SUPABASE_ANON_KEY } }
+    );
+    if(!res.ok) throw new Error('Fetch failed (' + res.status + ')');
+    const rows = await res.json();
+    const remote = rows[0];
+    const localUpdatedAt = state.updatedAt || '1970-01-01T00:00:00Z';
+
+    if(!remote){
+      await pushToSupabase();
+      showToast('No cloud data yet — pushed this device\'s data as the starting point.');
+    } else if(new Date(remote.updated_at) > new Date(localUpdatedAt)){
+      applySyncPayload(remote.data);
+      save();
+      renderAll();
+      showToast('Pulled newer data from the cloud (' + new Date(remote.updated_at).toLocaleString() + ').');
+    } else {
+      await pushToSupabase();
+      showToast('Pushed this device\'s changes to the cloud.');
+    }
+    updateSyncStatusText();
+  } catch(err){
+    showToast('Sync failed: ' + err.message, 6000);
+  } finally {
+    btn.disabled = false;
+  }
+}
+function updateSyncStatusText(){
+  const el = document.getElementById('sync-status-text');
+  el.textContent = state.updatedAt
+    ? 'Last synced: ' + new Date(state.updatedAt).toLocaleString()
+    : 'Not synced yet on this device.';
+}
+document.getElementById('btn-sync-now').addEventListener('click', syncNow);
+
+function save(){
+  state.updatedAt = new Date().toISOString();
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
 const LEGACY_KEY = 'frugalish_data_v1';
 
 function uid(){ return 'id_' + Math.random().toString(36).slice(2,10) + Date.now().toString(36); }
@@ -631,7 +716,6 @@ function load(){
     return defaultData();
   }catch(e){ return defaultData(); }
 }
-function save(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
 
 // ---------- Theme + palette ----------
 function applyTheme(){
@@ -1897,6 +1981,7 @@ function renderAll(){
   renderTransactions();
   renderQuickAddRow();
   document.getElementById('import-review-toggle').checked = !!state.importReviewMode;
+  updateSyncStatusText();
   renderSavings();
   renderCharts();
 }
@@ -1907,3 +1992,4 @@ renderAll();
 </script>
 </body>
 </html>
+
